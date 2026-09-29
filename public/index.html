@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LA Metro Headway Monitor</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen p-4 font-sans">
+  <div class="max-w-4xl mx-auto space-y-4">
+    
+    <!-- 검색바 -->
+    <div class="flex gap-2">
+      <input id="busInput" type="text" value="8513" placeholder="차량 번호 입력 (예: 8513)" 
+             class="flex-1 bg-slate-900 border border-slate-700 text-amber-400 font-bold px-4 py-3 rounded-lg text-lg focus:outline-none focus:border-amber-500">
+      <button onclick="fetchHeadway()" class="bg-amber-500 hover:bg-amber-600 text-slate-950 font-extrabold px-8 py-3 rounded-lg text-lg">추적</button>
+    </div>
+
+    <!-- 상태 메시지 -->
+    <div id="statusText" class="text-sm text-slate-400 font-medium px-1">노선 상태 확인 중...</div>
+
+    <!-- 앞차 카드 -->
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg flex justify-between items-center">
+      <div>
+        <div class="text-emerald-400 font-bold text-lg mb-1">▲ 앞차 (Lead Bus)</div>
+        <div id="leadBusId" class="text-3xl font-black text-slate-100">--</div>
+        <div class="text-xs text-slate-400 mt-1">Run: <span id="leadRun">--</span></div>
+      </div>
+      <div class="text-right">
+        <div class="text-3xl font-black text-emerald-400"><span id="leadMin">--</span> <span class="text-lg">분 앞</span></div>
+        <div class="text-xs text-slate-400 mt-1"><span id="leadMiles">--</span> miles</div>
+      </div>
+    </div>
+
+    <!-- 내 차량 카드 -->
+    <div class="bg-amber-500/10 border-2 border-amber-500 rounded-xl p-5 shadow-xl flex justify-between items-center">
+      <div>
+        <div class="text-amber-400 font-bold text-lg mb-1">● 내 차량</div>
+        <div id="myBusId" class="text-4xl font-black text-amber-400">--</div>
+        <div class="text-xs text-slate-300 mt-1">Run: <span id="myRun">--</span></div>
+      </div>
+      <div class="text-right">
+        <div class="bg-amber-500 text-slate-950 font-black px-3 py-1 rounded text-sm mb-1 inline-block">Line <span id="myLine">--</span></div>
+        <div class="text-xs text-slate-300">속도: <span id="mySpeed" class="font-bold">0</span> mph</div>
+      </div>
+    </div>
+
+    <!-- 뒤차 카드 -->
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg flex justify-between items-center">
+      <div>
+        <div class="text-sky-400 font-bold text-lg mb-1">▼ 뒤차 (Trail Bus)</div>
+        <div id="trailBusId" class="text-3xl font-black text-slate-100">--</div>
+        <div class="text-xs text-slate-400 mt-1">Run: <span id="trailRun">--</span></div>
+      </div>
+      <div class="text-right">
+        <div class="text-3xl font-black text-sky-400"><span id="trailMin">--</span> <span class="text-lg">분 뒤</span></div>
+        <div class="text-xs text-slate-400 mt-1"><span id="trailMiles">--</span> miles</div>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    async function fetchHeadway() {
+      const bus = document.getElementById('busInput').value.trim();
+      if (!bus) return;
+
+      const statusEl = document.getElementById('statusText');
+      statusEl.textContent = "실시간 데이터 동기화 중...";
+      statusEl.className = "text-sm text-amber-400 font-medium px-1";
+
+      try {
+        const res = await fetch(`/api/headway?bus=${bus}`);
+        const data = await res.json();
+
+        if (!res.ok) {
+          statusEl.textContent = data.error || "수신 실패";
+          statusEl.className = "text-sm text-rose-500 font-medium px-1";
+          return;
+        }
+
+        statusEl.textContent = `노선 내 총 ${data.totalOnRoute}대 운행 중 (갱신: ${data.updatedAt})`;
+        statusEl.className = "text-sm text-slate-400 font-medium px-1";
+
+        // 내 차
+        document.getElementById('myBusId').textContent = data.myBus.id;
+        document.getElementById('myLine').textContent = data.myBus.route;
+        document.getElementById('myRun').textContent = data.myBus.run;
+        document.getElementById('mySpeed').textContent = data.myBus.speed;
+
+        // 앞차
+        if (data.leadBus) {
+          document.getElementById('leadBusId').textContent = data.leadBus.id;
+          document.getElementById('leadRun').textContent = data.leadBus.run;
+          document.getElementById('leadMin').textContent = data.leadBus.gapMinutes;
+          document.getElementById('leadMiles').textContent = data.leadBus.gapMiles;
+        } else {
+          document.getElementById('leadBusId').textContent = "None";
+          document.getElementById('leadRun').textContent = "N/A";
+          document.getElementById('leadMin').textContent = "--";
+          document.getElementById('leadMiles').textContent = "--";
+        }
+
+        // 뒤차
+        if (data.trailBus) {
+          document.getElementById('trailBusId').textContent = data.trailBus.id;
+          document.getElementById('trailRun').textContent = data.trailBus.run;
+          document.getElementById('trailMin').textContent = data.trailBus.gapMinutes;
+          document.getElementById('trailMiles').textContent = data.trailBus.gapMiles;
+        } else {
+          document.getElementById('trailBusId').textContent = "None";
+          document.getElementById('trailRun').textContent = "N/A";
+          document.getElementById('trailMin').textContent = "--";
+          document.getElementById('trailMiles').textContent = "--";
+        }
+
+      } catch (err) {
+        statusEl.textContent = "서버 통신 에러 발생";
+        statusEl.className = "text-sm text-rose-500 font-medium px-1";
+      }
+    }
+
+    // 첫 로드 및 15초 자동 갱신
+    fetchHeadway();
+    setInterval(fetchHeadway, 15000);
+  </script>
+</body>
+</html>
