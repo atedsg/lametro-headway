@@ -13,26 +13,20 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const METRO_API_URL = 'https://api.metro.net/LAMetroGTFS_Realtime/vehicle_positions.json';
 
-function getDistanceInMiles(lat1, lon1, lat2, lon2) {
-  const R = 3958.8;
-  const dLat = (lat2 - lat1) * (Math.PI / 180);
-  const dLon = (lon2 - lon1) * (Math.PI / 180);
-  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
+// 각 차량 고유 Run ID / Work Run 파싱 함수 (NE26 중복 고정 문제 해결)
+function parseRunId(vehicleObj) {
+  if (!vehicleObj) return 'N/A';
 
-// Work Run 파싱: trip_id의 세 번째 마디나 trip_id 고유 식별자 추출
-function getVehicleRun(v) {
-  if (!v) return 'N/A';
-  const tripId = v.trip?.trip_id || '';
-  if (tripId) {
+  const tripId = vehicleObj.trip?.trip_id || '';
+  if (tripId.includes('_')) {
     const parts = tripId.split('_');
+    // 세 번째 마디가 있으면 세 번째 마디, 없으면 첫 번째 마디(Trip 번호) 사용
     if (parts.length >= 3 && parts[2]) return `Run ${parts[2]}`;
-    if (parts.length >= 2) return `Trip ${parts[0]}`;
-    return tripId;
+    if (parts.length >= 1 && parts[0]) return `Trip ${parts[0]}`;
   }
-  return v.vehicle?.label || 'N/A';
+
+  if (vehicleObj.vehicle?.label) return vehicleObj.vehicle.label;
+  return 'N/A';
 }
 
 app.get('/api/headway', async (req, res) => {
@@ -44,94 +38,97 @@ app.get('/api/headway', async (req, res) => {
 
   try {
     const response = await fetch(METRO_API_URL);
-    if (!response.ok) throw new Error(`API Error: ${response.status}`);
+    if (!response.ok) {
+      throw new Error(`Metro API 응답 오류: ${response.status}`);
+    }
 
     const data = await response.json();
     const entityList = data.entity || [];
 
-    // 1. 내 차량 찾기
+    // 1. 조회 대상 차량 찾기
     const targetEntity = entityList.find((e) => String(e.vehicle?.vehicle?.id) === String(targetVehicleId));
 
     if (!targetEntity) {
-      return res.status(404).json({ error: `차량 ${targetVehicleId}를 찾을 수 없습니다.` });
+      return res.status(404).json({ error: `차량 번호 ${targetVehicleId}를 찾을 수 없습니다.` });
     }
 
     const myVehicle = targetEntity.vehicle;
     const myRouteId = myVehicle.trip?.route_id;
     const myDirectionId = myVehicle.trip?.direction_id;
-    const myLat = myVehicle.position?.latitude;
-    const myLon = myVehicle.position?.longitude;
-    const myBearing = myVehicle.position?.bearing || 0;
+    const myStopSeq = myVehicle.current_stop_sequence || 0;
+    const myRun = parseRunId(myVehicle);
 
-    const candidates = [];
+    const aheadBuses = [];
+    const behindBuses = [];
 
+    // 2. 같은 노선 & 같은 방향 차량 분류
     entityList.forEach((e) => {
       const v = e.vehicle;
-      if (!v || !v.position) return;
+      if (!v) return;
       if (String(v.vehicle?.id) === String(targetVehicleId)) return;
 
-      // 같은 노선 확인
-      if (String(v.trip?.route_id) !== String(myRouteId)) return;
+      const isSameRoute = String(v.trip?.route_id) === String(myRouteId);
 
-      // direction_id 일치 여부 확인 (존재할 경우)
-      if (myDirectionId !== undefined && v.trip?.direction_id !== undefined && String(v.trip?.direction_id) !== String(myDirectionId)) {
-        return;
+      // direction_id 일치 여부 엄격 검증
+      const isSameDirection = myDirectionId !== undefined && v.trip?.direction_id !== undefined ? String(v.trip?.direction_id) === String(myDirectionId) : true;
+
+      if (isSameRoute && isSameDirection) {
+        const vStopSeq = v.current_stop_sequence || 0;
+        const vRun = parseRunId(v);
+
+        const busData = {
+          id: String(v.vehicle?.id),
+          run: vRun,
+          stopSeq: vStopSeq,
+        };
+
+        // stop_sequence 기준으로 단순 명쾌하게 분류 (거리 제약 제거)
+        if (vStopSeq > myStopSeq) {
+          aheadBuses.push(busData);
+        } else if (vStopSeq < myStopSeq) {
+          behindBuses.push(busData);
+        }
       }
-
-      const dist = getDistanceInMiles(myLat, myLon, v.position.latitude, v.position.longitude);
-
-      // 내차 진행방향 베어링 벡터와 타겟버스의 좌표 차이(delta) 계산
-      const rad = (myBearing * Math.PI) / 180;
-      const vx = Math.sin(rad);
-      const vy = Math.cos(rad);
-      const dx = (v.position.longitude - myLon) * Math.cos((myLat * Math.PI) / 180);
-      const dy = v.position.latitude - myLat;
-
-      const dot = dx * vx + dy * vy;
-
-      candidates.push({
-        id: String(v.vehicle?.id),
-        run: getVehicleRun(v),
-        distance: dist,
-        isAhead: dot > 0,
-      });
     });
 
-    // 거리순 정렬
-    const ahead = candidates.filter((c) => c.isAhead).sort((a, b) => a.distance - b.distance);
-    const behind = candidates.filter((c) => !c.isAhead).sort((a, b) => a.distance - b.distance);
+    // 3. 정류장 순서 차이가 가장 작은 순서로 정렬
+    aheadBuses.sort((a, b) => a.stopSeq - b.stopSeq); // 앞차: 나보다 순번이 가장 조금 높은 차
+    behindBuses.sort((a, b) => b.stopSeq - a.stopSeq); // 뒤차: 나보다 순번이 가장 조금 낮은 차
 
-    const leadVehicle = ahead[0] || null;
-    const trailVehicle = behind[0] || null;
+    const leadVehicle = aheadBuses[0] || null;
+    const trailVehicle = behindBuses[0] || null;
 
     res.json({
       timestamp: new Date().toISOString(),
       route_id: myRouteId,
+      direction_id: myDirectionId,
+      total_line_buses: aheadBuses.length + behindBuses.length + 1,
       my_vehicle: {
         vehicle_id: targetVehicleId,
-        run: getVehicleRun(myVehicle),
+        run: myRun,
         speed_mph: Math.round(myVehicle.position?.speed || 0),
+        stop_sequence: myStopSeq,
       },
       lead_bus: leadVehicle
         ? {
             vehicle_id: leadVehicle.id,
             run: leadVehicle.run,
-            distance_miles: leadVehicle.distance.toFixed(2),
-            headway_minutes: Math.max(1, Math.round((leadVehicle.distance / 15) * 60)),
+            stop_sequence: leadVehicle.stopSeq,
+            stops_ahead: leadVehicle.stopSeq - myStopSeq,
           }
         : null,
       trail_bus: trailVehicle
         ? {
             vehicle_id: trailVehicle.id,
             run: trailVehicle.run,
-            distance_miles: trailVehicle.distance.toFixed(2),
-            headway_minutes: Math.max(1, Math.round((trailVehicle.distance / 15) * 60)),
+            stop_sequence: trailVehicle.stopSeq,
+            stops_behind: myStopSeq - trailVehicle.stopSeq,
           }
         : null,
     });
   } catch (err) {
-    console.error('Error:', err);
-    res.status(500).json({ error: '서버 오류가 발생했습니다.' });
+    console.error('API Error:', err);
+    res.status(500).json({ error: '서버 데이터 처리 중 오류가 발생했습니다.' });
   }
 });
 
@@ -139,4 +136,6 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Headway Monitor 서버 실행 중: http://localhost:${PORT}`);
+});

@@ -1,188 +1,238 @@
-import express from 'express';
-import fetch from 'node-fetch';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-app.use(express.static(path.join(__dirname, 'public')));
-
-const METRO_API_URL = 'https://api.metro.net/LAMetroGTFS_Realtime/vehicle_positions.json';
-
-function getDistanceInMiles(lat1, lon1, lat2, lon2) {
-  const R = 3958.8;
-  const dLat = (lat2 - lat1) * (Math.PI / 180);
-  const dLon = (lon2 - lon1) * (Math.PI / 180);
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(lat1 * (Math.PI / 180)) *
-      Math.cos(lat2 * (Math.PI / 180)) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-
-// 각 차량 고유 Run ID / Work Run 파싱 함수
-function parseRunId(vehicleObj) {
-  if (!vehicleObj) return 'N/A';
-  
-  // 1. trip_id에서 식별 (예: 13201_NE26_1 -> NE26)
-  const tripId = vehicleObj.trip?.trip_id || '';
-  if (tripId.includes('_')) {
-    const parts = tripId.split('_');
-    if (parts.length >= 2 && parts[1]) return parts[1];
-  }
-
-  // 2. vehicle.label / run_id 직접 추출
-  if (vehicleObj.run_id) return vehicleObj.run_id;
-  if (vehicleObj.vehicle?.run_id) return vehicleObj.vehicle.run_id;
-  if (vehicleObj.trip?.run_id) return vehicleObj.trip.run_id;
-
-  return 'N/A';
-}
-
-app.get('/api/headway', async (req, res) => {
-  const targetVehicleId = req.query.vehicle_id;
-
-  if (!targetVehicleId) {
-    return res.status(400).json({ error: 'vehicle_id 파라미터가 필요합니다.' });
-  }
-
-  try {
-    const response = await fetch(METRO_API_URL);
-    if (!response.ok) {
-      throw new Error(`Metro API 응답 오류: ${response.status}`);
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LA Metro Headway Monitor</title>
+  <style>
+    :root {
+      --bg-color: #0f172a;
+      --card-bg: #1e293b;
+      --border-color: #334155;
+      --text-main: #f8fafc;
+      --text-sub: #94a3b8;
+      --accent-lead: #10b981;
+      --accent-my: #f59e0b;
+      --accent-trail: #3b82f6;
     }
 
-    const data = await response.json();
-    const entityList = data.entity || [];
-
-    // 1. 조회 대상 차량 찾기
-    const targetEntity = entityList.find(
-      (e) => String(e.vehicle?.vehicle?.id) === String(targetVehicleId)
-    );
-
-    if (!targetEntity) {
-      return res.status(404).json({ error: `차량 번호 ${targetVehicleId}를 찾을 수 없습니다.` });
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background-color: var(--bg-color);
+      color: var(--text-main);
+      margin: 0;
+      padding: 20px;
+      display: flex;
+      justify-content: center;
     }
 
-    const myVehicle = targetEntity.vehicle;
-    const myRouteId = myVehicle.trip?.route_id;
-    const myDirectionId = myVehicle.trip?.direction_id;
-    const myLat = myVehicle.position?.latitude;
-    const myLon = myVehicle.position?.longitude;
-    const myStopSeq = myVehicle.current_stop_sequence || 0;
-    const myRun = parseRunId(myVehicle);
+    .container {
+      width: 100%;
+      max-width: 500px;
+    }
 
-    const aheadBuses = [];
-    const behindBuses = [];
+    .search-box {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
 
-    // 2. 같은 노선 & 같은 방향 차량 분류 (stop_sequence 기준 정밀 판별)
-    entityList.forEach((e) => {
-      const v = e.vehicle;
-      if (!v || !v.position) return;
-      if (String(v.vehicle?.id) === String(targetVehicleId)) return;
+    input {
+      flex: 1;
+      padding: 12px 16px;
+      border-radius: 8px;
+      border: 1px solid var(--border-color);
+      background-color: var(--card-bg);
+      color: var(--text-main);
+      font-size: 16px;
+    }
 
-      const isSameRoute = String(v.trip?.route_id) === String(myRouteId);
-      const isSameDirection =
-        myDirectionId !== undefined && v.trip?.direction_id !== undefined
-          ? String(v.trip?.direction_id) === String(myDirectionId)
-          : true;
+    button {
+      padding: 12px 24px;
+      border-radius: 8px;
+      border: none;
+      background-color: var(--accent-my);
+      color: #000;
+      font-weight: bold;
+      font-size: 16px;
+      cursor: pointer;
+    }
 
-      if (isSameRoute && isSameDirection) {
-        const dist = getDistanceInMiles(
-          myLat,
-          myLon,
-          v.position.latitude,
-          v.position.longitude
-        );
-        const vStopSeq = v.current_stop_sequence || 0;
-        const vRun = parseRunId(v);
+    .status-bar {
+      font-size: 13px;
+      color: var(--text-sub);
+      margin-bottom: 15px;
+    }
 
-        const busData = {
-          id: String(v.vehicle?.id),
-          lat: v.position.latitude,
-          lon: v.position.longitude,
-          speed: v.position.speed || 0,
-          run: vRun,
-          distance: dist,
-          stopSeq: vStopSeq
-        };
+    .card {
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 12px;
+      position: relative;
+    }
 
-        // stop_sequence가 제공되는 경우 정류장 순서로 앞/뒤 구분
-        if (vStopSeq !== 0 && myStopSeq !== 0) {
-          if (vStopSeq > myStopSeq) {
-            aheadBuses.push(busData);
-          } else if (vStopSeq < myStopSeq) {
-            behindBuses.push(busData);
-          } else {
-            // stop_sequence가 동일한 경우 위도/경도 진행방향 기반 보정
-            if (dist < 3.0) behindBuses.push(busData);
-          }
-        } else {
-          // stop_sequence 부재 시 내차와의 거리 기반 분류
-          if (dist < 3.0) {
-            behindBuses.push(busData);
-          } else {
-            aheadBuses.push(busData);
-          }
-        }
+    .card.my-bus {
+      border: 2px solid var(--accent-my);
+    }
+
+    .card-header {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 6px;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .lead-title { color: var(--accent-lead); }
+    .my-title { color: var(--accent-my); }
+    .trail-title { color: var(--accent-trail); }
+
+    .vehicle-id {
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+    }
+
+    .run-id {
+      font-size: 12px;
+      color: var(--text-sub);
+      margin-top: 2px;
+    }
+
+    .card-right {
+      position: absolute;
+      right: 16px;
+      top: 50%;
+      transform: translateY(-50%);
+      text-align: right;
+    }
+
+    .metric-value {
+      font-size: 22px;
+      font-weight: bold;
+    }
+
+    .metric-unit {
+      font-size: 12px;
+      color: var(--text-sub);
+    }
+
+    .badge {
+      background-color: rgba(245, 158, 11, 0.2);
+      color: var(--accent-my);
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <div class="search-box">
+    <input type="text" id="vehicleIdInput" placeholder="차량 번호 입력 (예: 4038)" value="4038">
+    <button onclick="fetchHeadway()">추적</button>
+  </div>
+
+  <div class="status-bar" id="statusBar">노선 정보를 조회하려면 차량 번호를 입력하세요.</div>
+
+  <!-- 앞차 Card -->
+  <div class="card">
+    <div class="card-header lead-title">▲ 앞차 (Lead Bus)</div>
+    <div class="vehicle-id" id="leadId">--</div>
+    <div class="run-id" id="leadRun">Run: --</div>
+    <div class="card-right">
+      <div class="metric-value" id="leadStops" style="color: var(--accent-lead);">--</div>
+      <div class="metric-unit" id="leadSeq">정류장 앞</div>
+    </div>
+  </div>
+
+  <!-- 내 차량 Card -->
+  <div class="card my-bus">
+    <div class="card-header my-title">
+      ● 내 차량
+      <span class="badge" id="routeBadge">Line --</span>
+    </div>
+    <div class="vehicle-id" id="myId" style="color: var(--accent-my);">--</div>
+    <div class="run-id" id="myRun">Run: --</div>
+    <div class="card-right">
+      <div class="metric-value" id="mySpeed">--</div>
+      <div class="metric-unit">mph</div>
+    </div>
+  </div>
+
+  <!-- 뒤차 Card -->
+  <div class="card">
+    <div class="card-header trail-title">▼ 뒤차 (Trail Bus)</div>
+    <div class="vehicle-id" id="trailId">--</div>
+    <div class="run-id" id="trailRun">Run: --</div>
+    <div class="card-right">
+      <div class="metric-value" id="trailStops" style="color: var(--accent-trail);">--</div>
+      <div class="metric-unit" id="trailSeq">정류장 뒤</div>
+    </div>
+  </div>
+</div>
+
+<script>
+  async function fetchHeadway() {
+    const vehicleId = document.getElementById('vehicleIdInput').value.trim();
+    if (!vehicleId) return;
+
+    const statusBar = document.getElementById('statusBar');
+    statusBar.innerText = '데이터 조회 중...';
+
+    try {
+      const res = await fetch(`/api/headway?vehicle_id=${vehicleId}`);
+      if (!res.ok) {
+        const errData = await res.json();
+        throw new Error(errData.error || '조회 실패');
       }
-    });
 
-    // 3. 앞차/뒤차 거리순 정렬 (가장 가까운 차량 선택)
-    aheadBuses.sort((a, b) => a.distance - b.distance);
-    behindBuses.sort((a, b) => a.distance - b.distance);
+      const data = await res.json();
 
-    const leadVehicle = aheadBuses[0] || null;
-    const trailVehicle = behindBuses[0] || null;
+      // 상태 바 업데이트
+      const now = new Date(data.timestamp).toLocaleTimeString();
+      statusBar.innerText = `노선 ${data.route_id}번 | 총 ${data.total_line_buses}대 운행 중 (갱신: ${now})`;
 
-    const leadBus = leadVehicle
-      ? {
-          vehicle_id: leadVehicle.id,
-          run: leadVehicle.run,
-          distance_miles: leadVehicle.distance.toFixed(2),
-          headway_minutes: Math.max(1, Math.round((leadVehicle.distance / 15) * 60))
-        }
-      : null;
+      // 내 차량 데이터
+      document.getElementById('routeBadge').innerText = `Line ${data.route_id}`;
+      document.getElementById('myId').innerText = data.my_vehicle.vehicle_id;
+      document.getElementById('myRun').innerText = `${data.my_vehicle.run}`;
+      document.getElementById('mySpeed').innerText = data.my_vehicle.speed_mph;
 
-    const trailBus = trailVehicle
-      ? {
-          vehicle_id: trailVehicle.id,
-          run: trailVehicle.run,
-          distance_miles: trailVehicle.distance.toFixed(2),
-          headway_minutes: Math.max(1, Math.round((trailVehicle.distance / 15) * 60))
-        }
-      : null;
+      // 앞차 데이터
+      if (data.lead_bus) {
+        document.getElementById('leadId').innerText = data.lead_bus.vehicle_id;
+        document.getElementById('leadRun').innerText = `${data.lead_bus.run}`;
+        document.getElementById('leadStops').innerText = `${data.lead_bus.stops_ahead} 개`;
+      } else {
+        document.getElementById('leadId').innerText = 'None';
+        document.getElementById('leadRun').innerText = 'Run: N/A';
+        document.getElementById('leadStops').innerText = '--';
+      }
 
-    res.json({
-      timestamp: new Date().toISOString(),
-      route_id: myRouteId,
-      direction_id: myDirectionId,
-      total_line_buses: aheadBuses.length + behindBuses.length + 1,
-      my_vehicle: {
-        vehicle_id: targetVehicleId,
-        run: myRun,
-        speed_mph: Math.round(myVehicle.position?.speed || 0)
-      },
-      lead_bus: leadBus,
-      trail_bus: trailBus
-    });
-  } catch (err) {
-    console.error('API Error:', err);
-    res.status(500).json({ error: '서버 데이터 처리 중 오류가 발생했습니다.' });
+      // 뒤차 데이터
+      if (data.trail_bus) {
+        document.getElementById('trailId').innerText = data.trail_bus.vehicle_id;
+        document.getElementById('trailRun').innerText = `${data.trail_bus.run}`;
+        document.getElementById('trailStops').innerText = `${data.trail_bus.stops_behind} 개`;
+      } else {
+        document.getElementById('trailId').innerText = 'None';
+        document.getElementById('trailRun').innerText = 'Run: N/A';
+        document.getElementById('trailStops').innerText = '--';
+      }
+
+    } catch (err) {
+      statusBar.innerText = `오류: ${err.message}`;
+    }
   }
-});
 
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
+  // 초기 자동 조회를 실행하려면 아래 주석 해제
+  fetchHeadway();
+</script>
 
-app.listen(PORT, () => {
-  console.log(`Headway Monitor 서버 실행 중: http://localhost:${PORT}`);
-});
+</body>
+</html>
