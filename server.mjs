@@ -9,15 +9,13 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 정적 파일 제공 (public 폴더)
 app.use(express.static(path.join(__dirname, 'public')));
 
-// LA Metro GTFS-RT Vehicle Positions API URL
 const METRO_API_URL = 'https://api.metro.net/LAMetroGTFS_Realtime/vehicle_positions.json';
 
-// 두 좌표 간 거리 계산 (Haversine formula, 단위: miles)
+// Haversine 거리 계산 (miles)
 function getDistanceInMiles(lat1, lon1, lat2, lon2) {
-  const R = 3958.8; // 지구 반지름 (miles)
+  const R = 3958.8;
   const dLat = (lat2 - lat1) * (Math.PI / 180);
   const dLon = (lon2 - lon1) * (Math.PI / 180);
   const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
@@ -25,12 +23,10 @@ function getDistanceInMiles(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-// Run ID / Work Run 추출 헬퍼 함수
-function extractRunId(vehicle) {
-  return vehicle.run_id || vehicle.vehicle?.run_id || vehicle.trip?.run_id || vehicle.trip?.trip_id || 'N/A';
+function extractRunId(v) {
+  return v.run_id || v.vehicle?.run_id || v.trip?.run_id || v.trip?.trip_id || 'N/A';
 }
 
-// API 엔드포인트: 특정 차번 기준 앞차/뒤차 간격 조회
 app.get('/api/headway', async (req, res) => {
   const targetVehicleId = req.query.vehicle_id;
 
@@ -60,57 +56,74 @@ app.get('/api/headway', async (req, res) => {
     const myLat = myVehicle.position?.latitude;
     const myLon = myVehicle.position?.longitude;
 
-    // 2. 같은 노선 & "같은 운행 방향(direction_id)" 차량만 필터링
-    const sameDirectionVehicles = entityList
-      .filter((e) => {
-        const v = e.vehicle;
-        if (!v || !v.position) return false;
-        if (String(v.vehicle?.id) === String(targetVehicleId)) return false; // 내 차량 제외
+    // 2. 같은 노선 & 같은 direction_id 차량만 추출
+    const candidateVehicles = [];
 
-        const isSameRoute = String(v.trip?.route_id) === String(myRouteId);
-        // direction_id가 존재하는 경우 동일한 방향만 선택
-        const isSameDirection = myDirectionId !== undefined && v.trip?.direction_id !== undefined ? String(v.trip?.direction_id) === String(myDirectionId) : true;
+    entityList.forEach((e) => {
+      const v = e.vehicle;
+      if (!v || !v.position) return;
+      if (String(v.vehicle?.id) === String(targetVehicleId)) return;
 
-        return isSameRoute && isSameDirection;
-      })
-      .map((e) => {
-        const v = e.vehicle;
+      const isSameRoute = String(v.trip?.route_id) === String(myRouteId);
+      const isSameDirection = myDirectionId !== undefined && v.trip?.direction_id !== undefined ? String(v.trip?.direction_id) === String(myDirectionId) : true;
+
+      if (isSameRoute && isSameDirection) {
         const dist = getDistanceInMiles(myLat, myLon, v.position.latitude, v.position.longitude);
-        return {
+
+        // 진행 방향에 따른 위치 벡터 계산 (direction_id 0 vs 1 기반 동/서/남/북 벡터 추정)
+        // direction_id 0일 때와 1일 때 좌표 변화량(delta)으로 앞/뒤 판별
+        const dLat = v.position.latitude - myLat;
+        const dLon = v.position.longitude - myLon;
+
+        // direction_id가 0(동/남쪽 진행)인 경우 좌표 증가/감소로 앞/뒤 판별
+        let isAhead = false;
+        if (String(myDirectionId) === '0') {
+          // Eastbound/Southbound일 때 경도(lon) 증가 또는 위도(lat) 감소 방향
+          isAhead = dLon > 0 || dLat < 0;
+        } else {
+          // Westbound/Northbound일 때 경도(lon) 감소 또는 위도(lat) 증가 방향
+          isAhead = dLon < 0 || dLat > 0;
+        }
+
+        candidateVehicles.push({
           id: v.vehicle?.id,
           lat: v.position.latitude,
           lon: v.position.longitude,
           speed: v.position.speed || 0,
           run: extractRunId(v),
           distance: dist,
-        };
-      });
+          isAhead: isAhead,
+        });
+      }
+    });
 
-    // 3. 거리순 정렬 (가장 가까운 차량 찾기)
-    sameDirectionVehicles.sort((a, b) => a.distance - b.distance);
+    // 앞차 후보군 (isAhead = true 중 가장 가까운 차)
+    const aheadBuses = candidateVehicles.filter((b) => b.isAhead);
+    aheadBuses.sort((a, b) => a.distance - b.distance);
+    const leadVehicle = aheadBuses[0] || null;
 
-    // 거리 기반 가장 가까운 차량 2대 선택 (앞/뒤 추정)
-    const leadVehicle = sameDirectionVehicles[0] || null;
-    const trailVehicle = sameDirectionVehicles[1] || null;
+    // 뒤차 후보군 (isAhead = false 중 가장 가까운 차)
+    const behindBuses = candidateVehicles.filter((b) => !b.isAhead);
+    behindBuses.sort((a, b) => a.distance - b.distance);
+    const trailVehicle = behindBuses[0] || null;
 
-    // 4. 각각의 차량에 고유 Run ID 및 정보 개별 할당
     const myRun = extractRunId(myVehicle);
 
     const leadBus = leadVehicle
       ? {
           vehicle_id: leadVehicle.id,
-          run: leadVehicle.run, // 앞차 고유 Run ID
+          run: leadVehicle.run,
           distance_miles: leadVehicle.distance.toFixed(2),
-          headway_minutes: Math.round((leadVehicle.distance / 15) * 60), // 약 15mph 평균속도 기준 추정분
+          headway_minutes: Math.max(1, Math.round((leadVehicle.distance / 15) * 60)),
         }
       : null;
 
     const trailBus = trailVehicle
       ? {
           vehicle_id: trailVehicle.id,
-          run: trailVehicle.run, // 뒤차 고유 Run ID
+          run: trailVehicle.run,
           distance_miles: trailVehicle.distance.toFixed(2),
-          headway_minutes: Math.round((trailVehicle.distance / 15) * 60),
+          headway_minutes: Math.max(1, Math.round((trailVehicle.distance / 15) * 60)),
         }
       : null;
 
@@ -118,7 +131,7 @@ app.get('/api/headway', async (req, res) => {
       timestamp: new Date().toISOString(),
       route_id: myRouteId,
       direction_id: myDirectionId,
-      total_line_buses: sameDirectionVehicles.length + 1,
+      total_line_buses: candidateVehicles.length + 1,
       my_vehicle: {
         vehicle_id: targetVehicleId,
         run: myRun,
@@ -133,7 +146,6 @@ app.get('/api/headway', async (req, res) => {
   }
 });
 
-// 루트 페이지
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
