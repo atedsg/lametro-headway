@@ -13,7 +13,6 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const METRO_API_URL = 'https://api.metro.net/LAMetroGTFS_Realtime/vehicle_positions.json';
 
-// Haversine 거리 계산 (miles)
 function getDistanceInMiles(lat1, lon1, lat2, lon2) {
   const R = 3958.8;
   const dLat = (lat2 - lat1) * (Math.PI / 180);
@@ -24,7 +23,7 @@ function getDistanceInMiles(lat1, lon1, lat2, lon2) {
 }
 
 function extractRunId(v) {
-  return v.run_id || v.vehicle?.run_id || v.trip?.run_id || v.trip?.trip_id || 'N/A';
+  return v.vehicle?.run_id || v.trip?.run_id || v.run_id || v.trip?.trip_id || 'N/A';
 }
 
 app.get('/api/headway', async (req, res) => {
@@ -43,7 +42,6 @@ app.get('/api/headway', async (req, res) => {
     const data = await response.json();
     const entityList = data.entity || [];
 
-    // 1. Target 차량 찾기
     const targetEntity = entityList.find((e) => String(e.vehicle?.vehicle?.id) === String(targetVehicleId));
 
     if (!targetEntity) {
@@ -55,9 +53,9 @@ app.get('/api/headway', async (req, res) => {
     const myDirectionId = myVehicle.trip?.direction_id;
     const myLat = myVehicle.position?.latitude;
     const myLon = myVehicle.position?.longitude;
+    const myStopSeq = myVehicle.current_stop_sequence || 0;
 
-    // 2. 같은 노선 & 같은 direction_id 차량만 추출
-    const candidateVehicles = [];
+    const sameDirectionVehicles = [];
 
     entityList.forEach((e) => {
       const v = e.vehicle;
@@ -69,43 +67,40 @@ app.get('/api/headway', async (req, res) => {
 
       if (isSameRoute && isSameDirection) {
         const dist = getDistanceInMiles(myLat, myLon, v.position.latitude, v.position.longitude);
+        const vStopSeq = v.current_stop_sequence || 0;
 
-        // 진행 방향에 따른 위치 벡터 계산 (direction_id 0 vs 1 기반 동/서/남/북 벡터 추정)
-        // direction_id 0일 때와 1일 때 좌표 변화량(delta)으로 앞/뒤 판별
-        const dLat = v.position.latitude - myLat;
-        const dLon = v.position.longitude - myLon;
+        // stop_sequence 비교 기반 (또는 상대 거리)
+        const isAhead = vStopSeq > myStopSeq;
 
-        // direction_id가 0(동/남쪽 진행)인 경우 좌표 증가/감소로 앞/뒤 판별
-        let isAhead = false;
-        if (String(myDirectionId) === '0') {
-          // Eastbound/Southbound일 때 경도(lon) 증가 또는 위도(lat) 감소 방향
-          isAhead = dLon > 0 || dLat < 0;
-        } else {
-          // Westbound/Northbound일 때 경도(lon) 감소 또는 위도(lat) 증가 방향
-          isAhead = dLon < 0 || dLat > 0;
-        }
-
-        candidateVehicles.push({
-          id: v.vehicle?.id,
+        sameDirectionVehicles.push({
+          id: String(v.vehicle?.id),
           lat: v.position.latitude,
           lon: v.position.longitude,
           speed: v.position.speed || 0,
           run: extractRunId(v),
           distance: dist,
+          stopSeq: vStopSeq,
           isAhead: isAhead,
         });
       }
     });
 
-    // 앞차 후보군 (isAhead = true 중 가장 가까운 차)
-    const aheadBuses = candidateVehicles.filter((b) => b.isAhead);
+    // 앞차/뒤차 분리 및 거리 정렬
+    const aheadBuses = sameDirectionVehicles.filter((b) => b.isAhead);
     aheadBuses.sort((a, b) => a.distance - b.distance);
-    const leadVehicle = aheadBuses[0] || null;
 
-    // 뒤차 후보군 (isAhead = false 중 가장 가까운 차)
-    const behindBuses = candidateVehicles.filter((b) => !b.isAhead);
+    const behindBuses = sameDirectionVehicles.filter((b) => !b.isAhead);
     behindBuses.sort((a, b) => a.distance - b.distance);
-    const trailVehicle = behindBuses[0] || null;
+
+    // Stop Sequence 구분이 명확하지 않을 때 거리 기반 fallback 정렬
+    let leadVehicle = aheadBuses[0] || null;
+    let trailVehicle = behindBuses[0] || null;
+
+    if (!leadVehicle && !trailVehicle && sameDirectionVehicles.length > 0) {
+      sameDirectionVehicles.sort((a, b) => a.distance - b.distance);
+      leadVehicle = sameDirectionVehicles[0];
+      trailVehicle = sameDirectionVehicles[1] || null;
+    }
 
     const myRun = extractRunId(myVehicle);
 
@@ -131,7 +126,7 @@ app.get('/api/headway', async (req, res) => {
       timestamp: new Date().toISOString(),
       route_id: myRouteId,
       direction_id: myDirectionId,
-      total_line_buses: candidateVehicles.length + 1,
+      total_line_buses: sameDirectionVehicles.length + 1,
       my_vehicle: {
         vehicle_id: targetVehicleId,
         run: myRun,
