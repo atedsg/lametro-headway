@@ -1,131 +1,188 @@
-<!DOCTYPE html>
-<html lang="ko">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>LA Metro Headway Monitor</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-</head>
-<body class="bg-slate-950 text-slate-100 min-h-screen p-4 font-sans">
-  <div class="max-w-4xl mx-auto space-y-4">
-    
-    <!-- 검색바 -->
-    <div class="flex gap-2">
-      <input id="busInput" type="text" value="4038" placeholder="차량 번호 입력 (예: 4038)" 
-             class="flex-1 bg-slate-900 border border-slate-700 text-amber-400 font-bold px-4 py-3 rounded-lg text-lg focus:outline-none focus:border-amber-500">
-      <button onclick="fetchHeadway()" class="bg-amber-500 hover:bg-amber-600 text-slate-950 font-extrabold px-8 py-3 rounded-lg text-lg">추적</button>
-    </div>
+import express from 'express';
+import fetch from 'node-fetch';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-    <!-- 상태 메시지 -->
-    <div id="statusText" class="text-sm text-slate-400 font-medium px-1">노선 상태 확인 중...</div>
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-    <!-- 앞차 카드 -->
-    <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg flex justify-between items-center">
-      <div>
-        <div class="text-emerald-400 font-bold text-lg mb-1">▲ 앞차 (Lead Bus)</div>
-        <div id="leadBusId" class="text-3xl font-black text-slate-100">--</div>
-        <div class="text-xs text-slate-400 mt-1">Run: <span id="leadRun">--</span></div>
-      </div>
-      <div class="text-right">
-        <div class="text-3xl font-black text-emerald-400"><span id="leadMin">--</span> <span class="text-lg">분 앞</span></div>
-        <div class="text-xs text-slate-400 mt-1"><span id="leadMiles">--</span> miles</div>
-      </div>
-    </div>
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-    <!-- 내 차량 카드 -->
-    <div class="bg-amber-500/10 border-2 border-amber-500 rounded-xl p-5 shadow-xl flex justify-between items-center">
-      <div>
-        <div class="text-amber-400 font-bold text-lg mb-1">● 내 차량</div>
-        <div id="myBusId" class="text-4xl font-black text-amber-400">--</div>
-        <div class="text-xs text-slate-300 mt-1">Run: <span id="myRun">--</span></div>
-      </div>
-      <div class="text-right">
-        <div class="bg-amber-500 text-slate-950 font-black px-3 py-1 rounded text-sm mb-1 inline-block">Line <span id="myLine">--</span></div>
-        <div class="text-xs text-slate-300">속도: <span id="mySpeed" class="font-bold">0</span> mph</div>
-      </div>
-    </div>
+app.use(express.static(path.join(__dirname, 'public')));
 
-    <!-- 뒤차 카드 -->
-    <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg flex justify-between items-center">
-      <div>
-        <div class="text-sky-400 font-bold text-lg mb-1">▼ 뒤차 (Trail Bus)</div>
-        <div id="trailBusId" class="text-3xl font-black text-slate-100">--</div>
-        <div class="text-xs text-slate-400 mt-1">Run: <span id="trailRun">--</span></div>
-      </div>
-      <div class="text-right">
-        <div class="text-3xl font-black text-sky-400"><span id="trailMin">--</span> <span class="text-lg">분 뒤</span></div>
-        <div class="text-xs text-slate-400 mt-1"><span id="trailMiles">--</span> miles</div>
-      </div>
-    </div>
+const METRO_API_URL = 'https://api.metro.net/LAMetroGTFS_Realtime/vehicle_positions.json';
 
-  </div>
+function getDistanceInMiles(lat1, lon1, lat2, lon2) {
+  const R = 3958.8;
+  const dLat = (lat2 - lat1) * (Math.PI / 180);
+  const dLon = (lon2 - lon1) * (Math.PI / 180);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * (Math.PI / 180)) *
+      Math.cos(lat2 * (Math.PI / 180)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
 
-  <script>
-    async function fetchHeadway() {
-      const bus = document.getElementById('busInput').value.trim();
-      if (!bus) return;
+// 차량 고유 Run ID 추출 함수
+function getVehicleRun(v) {
+  if (!v) return 'N/A';
+  
+  // 1. vehicle.trip.trip_id 파싱 (LA Metro 포맷: ex. 13201_NE26_1)
+  const tripId = v.trip?.trip_id || '';
+  if (tripId.includes('_')) {
+    const parts = tripId.split('_');
+    if (parts.length >= 2 && parts[1]) return parts[1];
+  }
 
-      const statusEl = document.getElementById('statusText');
-      statusEl.textContent = "실시간 데이터 동기화 중...";
-      statusEl.className = "text-sm text-amber-400 font-medium px-1";
+  // 2. 기타 객체 내부 run_id 필드 검색
+  if (v.run_id) return v.run_id;
+  if (v.vehicle?.run_id) return v.vehicle.run_id;
+  if (v.trip?.run_id) return v.trip.run_id;
 
-      try {
-        const res = await fetch(`/api/headway?vehicle_id=${bus}`);
-        const data = await res.json();
+  return 'N/A';
+}
 
-        if (!res.ok) {
-          statusEl.textContent = data.error || "수신 실패";
-          statusEl.className = "text-sm text-rose-500 font-medium px-1";
-          return;
-        }
+app.get('/api/headway', async (req, res) => {
+  const targetVehicleId = req.query.vehicle_id;
 
-        const now = new Date().toLocaleTimeString();
-        statusEl.textContent = `노선 내 총 ${data.total_line_buses}대 운행 중 (갱신: ${now})`;
-        statusEl.className = "text-sm text-slate-400 font-medium px-1";
+  if (!targetVehicleId) {
+    return res.status(400).json({ error: 'vehicle_id 파라미터가 필요합니다.' });
+  }
 
-        // 내 차
-        if (data.my_vehicle) {
-          document.getElementById('myBusId').textContent = data.my_vehicle.vehicle_id;
-          document.getElementById('myLine').textContent = data.route_id || "--";
-          document.getElementById('myRun').textContent = data.my_vehicle.run;
-          document.getElementById('mySpeed').textContent = data.my_vehicle.speed_mph;
-        }
-
-        // 앞차
-        if (data.lead_bus) {
-          document.getElementById('leadBusId').textContent = data.lead_bus.vehicle_id;
-          document.getElementById('leadRun').textContent = data.lead_bus.run;
-          document.getElementById('leadMin').textContent = data.lead_bus.headway_minutes;
-          document.getElementById('leadMiles').textContent = data.lead_bus.distance_miles;
-        } else {
-          document.getElementById('leadBusId').textContent = "None";
-          document.getElementById('leadRun').textContent = "N/A";
-          document.getElementById('leadMin').textContent = "--";
-          document.getElementById('leadMiles').textContent = "--";
-        }
-
-        // 뒤차
-        if (data.trail_bus) {
-          document.getElementById('trailBusId').textContent = data.trail_bus.vehicle_id;
-          document.getElementById('trailRun').textContent = data.trail_bus.run;
-          document.getElementById('trailMin').textContent = data.trail_bus.headway_minutes;
-          document.getElementById('trailMiles').textContent = data.trail_bus.distance_miles;
-        } else {
-          document.getElementById('trailBusId').textContent = "None";
-          document.getElementById('trailRun').textContent = "N/A";
-          document.getElementById('trailMin').textContent = "--";
-          document.getElementById('trailMiles').textContent = "--";
-        }
-
-      } catch (err) {
-        statusEl.textContent = "서버 통신 에러 발생";
-        statusEl.className = "text-sm text-rose-500 font-medium px-1";
-      }
+  try {
+    const response = await fetch(METRO_API_URL);
+    if (!response.ok) {
+      throw new Error(`Metro API 응답 오류: ${response.status}`);
     }
 
-    // 첫 로드 및 15초 자동 갱신
-    fetchHeadway();
-    setInterval(fetchHeadway, 15000);
-  </script>
-</body>
-</html>
+    const data = await response.json();
+    const entityList = data.entity || [];
+
+    // 대상 차량 찾기
+    const targetEntity = entityList.find(
+      (e) => String(e.vehicle?.vehicle?.id) === String(targetVehicleId)
+    );
+
+    if (!targetEntity) {
+      return res.status(404).json({ error: `차량 번호 ${targetVehicleId}를 찾을 수 없습니다.` });
+    }
+
+    const myVehicle = targetEntity.vehicle;
+    const myRouteId = myVehicle.trip?.route_id;
+    const myDirectionId = myVehicle.trip?.direction_id;
+    const myLat = myVehicle.position?.latitude;
+    const myLon = myVehicle.position?.longitude;
+    const myBearing = myVehicle.position?.bearing || 0; // 내 차의 진행 방위각 (0~360도)
+    const myRun = getVehicleRun(myVehicle);
+
+    const sameDirectionVehicles = [];
+
+    entityList.forEach((e) => {
+      const v = e.vehicle;
+      if (!v || !v.position) return;
+      if (String(v.vehicle?.id) === String(targetVehicleId)) return;
+
+      const isSameRoute = String(v.trip?.route_id) === String(myRouteId);
+      
+      // 방위각(bearing) 차이 검증 (같은 방향으로 가고 있는지 확인: 60도 이내)
+      const vBearing = v.position.bearing || 0;
+      let bearingDiff = Math.abs(myBearing - vBearing);
+      if (bearingDiff > 180) bearingDiff = 360 - bearingDiff;
+      const isSimilarBearing = myBearing === 0 || vBearing === 0 || bearingDiff < 60;
+
+      // direction_id 및 bearing 조건 결합
+      const isSameDirection =
+        (myDirectionId !== undefined && v.trip?.direction_id !== undefined
+          ? String(v.trip?.direction_id) === String(myDirectionId)
+          : true) && isSimilarBearing;
+
+      if (isSameRoute && isSameDirection) {
+        const dist = getDistanceInMiles(
+          myLat,
+          myLon,
+          v.position.latitude,
+          v.position.longitude
+        );
+
+        // 내 차 방위각 기반 전방/후방 벡터 판별
+        const rad = (myBearing * Math.PI) / 180;
+        const forwardVectorX = Math.sin(rad); // East-West
+        const forwardVectorY = Math.cos(rad); // North-South
+
+        const deltaX = (v.position.longitude - myLon) * Math.cos((myLat * Math.PI) / 180);
+        const deltaY = v.position.latitude - myLat;
+
+        // 내 차 진행 방향 벡터와의 내적(Dot Product)으로 앞/뒤 판별
+        const dotProduct = deltaX * forwardVectorX + deltaY * forwardVectorY;
+        const isAhead = dotProduct > 0;
+
+        sameDirectionVehicles.push({
+          id: String(v.vehicle?.id),
+          lat: v.position.latitude,
+          lon: v.position.longitude,
+          speed: v.position.speed || 0,
+          run: getVehicleRun(v), // 차량 개별 고유 Run ID
+          distance: dist,
+          isAhead: isAhead
+        });
+      }
+    });
+
+    // 앞차 (isAhead = true 중 가장 가까운 차량)
+    const aheadBuses = sameDirectionVehicles.filter((b) => b.isAhead);
+    aheadBuses.sort((a, b) => a.distance - b.distance);
+    const leadVehicle = aheadBuses[0] || null;
+
+    // 뒤차 (isAhead = false 중 가장 가까운 차량)
+    const behindBuses = sameDirectionVehicles.filter((b) => !b.isAhead);
+    behindBuses.sort((a, b) => a.distance - b.distance);
+    const trailVehicle = behindBuses[0] || null;
+
+    const leadBus = leadVehicle
+      ? {
+          vehicle_id: leadVehicle.id,
+          run: leadVehicle.run,
+          distance_miles: leadVehicle.distance.toFixed(2),
+          headway_minutes: Math.max(1, Math.round((leadVehicle.distance / 15) * 60))
+        }
+      : null;
+
+    const trailBus = trailVehicle
+      ? {
+          vehicle_id: trailVehicle.id,
+          run: trailVehicle.run,
+          distance_miles: trailVehicle.distance.toFixed(2),
+          headway_minutes: Math.max(1, Math.round((trailVehicle.distance / 15) * 60))
+        }
+      : null;
+
+    res.json({
+      timestamp: new Date().toISOString(),
+      route_id: myRouteId,
+      direction_id: myDirectionId,
+      total_line_buses: sameDirectionVehicles.length + 1,
+      my_vehicle: {
+        vehicle_id: targetVehicleId,
+        run: myRun,
+        speed_mph: Math.round(myVehicle.position?.speed || 0)
+      },
+      lead_bus: leadBus,
+      trail_bus: trailBus
+    });
+  } catch (err) {
+    console.error('API Error:', err);
+    res.status(500).json({ error: '서버 데이터 처리 중 오류가 발생했습니다.' });
+  }
+});
+
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+app.listen(PORT, () => {
+  console.log(`Headway Monitor 서버 실행 중: http://localhost:${PORT}`);
+});
