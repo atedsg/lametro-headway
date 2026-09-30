@@ -22,16 +22,20 @@ function getDistanceInMiles(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-// Work Run ID 파싱 (trip_id 전체 또는 vehicle label 기반)
+// Work Run 추출: NE26 고정 문제를 해결하기 위해 trip_id 전체 및 vehicle label 조합 사용
 function getVehicleRun(v) {
   if (!v) return 'N/A';
   const tripId = v.trip?.trip_id || '';
+
   if (tripId) {
     const parts = tripId.split('_');
-    if (parts.length >= 3) return `${parts[1]}-${parts[2]}`;
-    if (parts.length >= 2) return parts[1];
-    return tripId;
+    // 세 번째 마디가 존재하면 Run 구분자로 사용 (예: 13201_NE26_1 -> Run #1)
+    if (parts.length >= 3 && parts[2]) {
+      return `Run ${parts[2]}`;
+    }
+    return parts[0]; // Trip 번호 반환
   }
+
   return v.vehicle?.label || 'N/A';
 }
 
@@ -63,10 +67,6 @@ app.get('/api/headway', async (req, res) => {
     const myBearing = myVehicle.position?.bearing || 0;
     const myStopSeq = myVehicle.current_stop_sequence || 0;
 
-    // TransSee 스타일 방향 판단 (trip_id 접미사/패턴 기반)
-    const myTripId = myVehicle.trip?.trip_id || '';
-    const myDirPattern = myTripId.split('_').pop() || '';
-
     const validCandidates = [];
 
     entityList.forEach((e) => {
@@ -74,15 +74,14 @@ app.get('/api/headway', async (req, res) => {
       if (!v || !v.position) return;
       if (String(v.vehicle?.id) === String(targetVehicleId)) return;
 
-      // 1. 노선 일치 여부
+      // 1. 같은 노선만 필터링
       if (String(v.trip?.route_id) !== String(myRouteId)) return;
 
-      // 2. 방향 검증 (direction_id 및 bearing 45도 이내 조건)
+      // 2. 진행 방향(bearing) 검증 (50도 이상 차이나면 반대 방향으로 간주하여 제외)
       const vBearing = v.position.bearing || 0;
       let bearingDiff = Math.abs(myBearing - vBearing);
       if (bearingDiff > 180) bearingDiff = 360 - bearingDiff;
 
-      // bearing 차이가 50도 이하인 경우 동일 방향으로 인정 (반대 방향 3893 즉시 제거)
       if (myBearing !== 0 && vBearing !== 0 && bearingDiff > 50) return;
 
       const dist = getDistanceInMiles(myLat, myLon, v.position.latitude, v.position.longitude);
@@ -93,12 +92,10 @@ app.get('/api/headway', async (req, res) => {
         run: getVehicleRun(v),
         distance: dist,
         stopSeq: vStopSeq,
-        lat: v.position.latitude,
-        lon: v.position.longitude,
       });
     });
 
-    // 정류장 순서(stopSeq) 및 거리 기반 전방(앞차)/후방(뒤차) 분류
+    // 정류장 순서(stopSeq) 및 거리를 결합한 앞차/뒤차 판별
     const ahead = [];
     const behind = [];
 
@@ -108,9 +105,9 @@ app.get('/api/headway', async (req, res) => {
         else if (b.stopSeq < myStopSeq) behind.push(b);
         else {
           if (b.distance < 2.0) behind.push(b);
+          else ahead.push(b);
         }
       } else {
-        // stopSeq 부재 시 거리 정렬
         if (b.distance < 3.0) behind.push(b);
         else ahead.push(b);
       }
