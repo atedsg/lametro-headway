@@ -22,20 +22,16 @@ function getDistanceInMiles(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-// Work Run 추출: NE26 고정 문제를 해결하기 위해 trip_id 전체 및 vehicle label 조합 사용
+// Work Run 파싱: trip_id의 세 번째 마디나 trip_id 고유 식별자 추출
 function getVehicleRun(v) {
   if (!v) return 'N/A';
   const tripId = v.trip?.trip_id || '';
-
   if (tripId) {
     const parts = tripId.split('_');
-    // 세 번째 마디가 존재하면 Run 구분자로 사용 (예: 13201_NE26_1 -> Run #1)
-    if (parts.length >= 3 && parts[2]) {
-      return `Run ${parts[2]}`;
-    }
-    return parts[0]; // Trip 번호 반환
+    if (parts.length >= 3 && parts[2]) return `Run ${parts[2]}`;
+    if (parts.length >= 2) return `Trip ${parts[0]}`;
+    return tripId;
   }
-
   return v.vehicle?.label || 'N/A';
 }
 
@@ -53,7 +49,7 @@ app.get('/api/headway', async (req, res) => {
     const data = await response.json();
     const entityList = data.entity || [];
 
-    // 타겟 차량 탐색
+    // 1. 내 차량 찾기
     const targetEntity = entityList.find((e) => String(e.vehicle?.vehicle?.id) === String(targetVehicleId));
 
     if (!targetEntity) {
@@ -62,59 +58,48 @@ app.get('/api/headway', async (req, res) => {
 
     const myVehicle = targetEntity.vehicle;
     const myRouteId = myVehicle.trip?.route_id;
+    const myDirectionId = myVehicle.trip?.direction_id;
     const myLat = myVehicle.position?.latitude;
     const myLon = myVehicle.position?.longitude;
     const myBearing = myVehicle.position?.bearing || 0;
-    const myStopSeq = myVehicle.current_stop_sequence || 0;
 
-    const validCandidates = [];
+    const candidates = [];
 
     entityList.forEach((e) => {
       const v = e.vehicle;
       if (!v || !v.position) return;
       if (String(v.vehicle?.id) === String(targetVehicleId)) return;
 
-      // 1. 같은 노선만 필터링
+      // 같은 노선 확인
       if (String(v.trip?.route_id) !== String(myRouteId)) return;
 
-      // 2. 진행 방향(bearing) 검증 (50도 이상 차이나면 반대 방향으로 간주하여 제외)
-      const vBearing = v.position.bearing || 0;
-      let bearingDiff = Math.abs(myBearing - vBearing);
-      if (bearingDiff > 180) bearingDiff = 360 - bearingDiff;
-
-      if (myBearing !== 0 && vBearing !== 0 && bearingDiff > 50) return;
+      // direction_id 일치 여부 확인 (존재할 경우)
+      if (myDirectionId !== undefined && v.trip?.direction_id !== undefined && String(v.trip?.direction_id) !== String(myDirectionId)) {
+        return;
+      }
 
       const dist = getDistanceInMiles(myLat, myLon, v.position.latitude, v.position.longitude);
-      const vStopSeq = v.current_stop_sequence || 0;
 
-      validCandidates.push({
+      // 내차 진행방향 베어링 벡터와 타겟버스의 좌표 차이(delta) 계산
+      const rad = (myBearing * Math.PI) / 180;
+      const vx = Math.sin(rad);
+      const vy = Math.cos(rad);
+      const dx = (v.position.longitude - myLon) * Math.cos((myLat * Math.PI) / 180);
+      const dy = v.position.latitude - myLat;
+
+      const dot = dx * vx + dy * vy;
+
+      candidates.push({
         id: String(v.vehicle?.id),
         run: getVehicleRun(v),
         distance: dist,
-        stopSeq: vStopSeq,
+        isAhead: dot > 0,
       });
     });
 
-    // 정류장 순서(stopSeq) 및 거리를 결합한 앞차/뒤차 판별
-    const ahead = [];
-    const behind = [];
-
-    validCandidates.forEach((b) => {
-      if (myStopSeq !== 0 && b.stopSeq !== 0) {
-        if (b.stopSeq > myStopSeq) ahead.push(b);
-        else if (b.stopSeq < myStopSeq) behind.push(b);
-        else {
-          if (b.distance < 2.0) behind.push(b);
-          else ahead.push(b);
-        }
-      } else {
-        if (b.distance < 3.0) behind.push(b);
-        else ahead.push(b);
-      }
-    });
-
-    ahead.sort((a, b) => a.distance - b.distance);
-    behind.sort((a, b) => a.distance - b.distance);
+    // 거리순 정렬
+    const ahead = candidates.filter((c) => c.isAhead).sort((a, b) => a.distance - b.distance);
+    const behind = candidates.filter((c) => !c.isAhead).sort((a, b) => a.distance - b.distance);
 
     const leadVehicle = ahead[0] || null;
     const trailVehicle = behind[0] || null;
