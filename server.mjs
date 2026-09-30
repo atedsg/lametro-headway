@@ -1,130 +1,143 @@
 import express from 'express';
+import fetch from 'node-fetch';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import GtfsRealtimeBindings from 'gtfs-realtime-bindings';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
+// 정적 파일 제공 (public 폴더)
 app.use(express.static(path.join(__dirname, 'public')));
 
-const API_KEY = '4f0da7eaf402ee4d3b330fb7a10a1a71';
-const AGENCY_KEY = 'lametro';
-const SWIFTLY_VEHICLES_URL = `https://api.goswift.ly/real-time/${AGENCY_KEY}/gtfs-rt-vehicle-positions`;
+// LA Metro GTFS-RT Vehicle Positions API URL
+const METRO_API_URL = 'https://api.metro.net/LAMetroGTFS_Realtime/vehicle_positions.json';
 
+// 두 좌표 간 거리 계산 (Haversine formula, 단위: miles)
+function getDistanceInMiles(lat1, lon1, lat2, lon2) {
+  const R = 3958.8; // 지구 반지름 (miles)
+  const dLat = (lat2 - lat1) * (Math.PI / 180);
+  const dLon = (lon2 - lon1) * (Math.PI / 180);
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+// Run ID / Work Run 추출 헬퍼 함수
+function extractRunId(vehicle) {
+  return vehicle.run_id || vehicle.vehicle?.run_id || vehicle.trip?.run_id || vehicle.trip?.trip_id || 'N/A';
+}
+
+// API 엔드포인트: 특정 차번 기준 앞차/뒤차 간격 조회
 app.get('/api/headway', async (req, res) => {
-  const targetBus = req.query.bus?.trim();
-  if (!targetBus) {
-    return res.status(400).json({ error: '차량 번호를 입력하세요.' });
+  const targetVehicleId = req.query.vehicle_id;
+
+  if (!targetVehicleId) {
+    return res.status(400).json({ error: 'vehicle_id 파라미터가 필요합니다.' });
   }
 
   try {
-    let response = await fetch(`${SWIFTLY_VEHICLES_URL}?apiKey=${API_KEY}`, {
-      headers: { Accept: 'application/x-protobuf' },
-    });
-
+    const response = await fetch(METRO_API_URL);
     if (!response.ok) {
-      response = await fetch(SWIFTLY_VEHICLES_URL, {
-        headers: {
-          Authorization: API_KEY,
-          Accept: 'application/x-protobuf',
-        },
+      throw new Error(`Metro API 응답 오류: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const entityList = data.entity || [];
+
+    // 1. Target 차량 찾기
+    const targetEntity = entityList.find((e) => String(e.vehicle?.vehicle?.id) === String(targetVehicleId));
+
+    if (!targetEntity) {
+      return res.status(404).json({ error: `차량 번호 ${targetVehicleId}를 찾을 수 없습니다.` });
+    }
+
+    const myVehicle = targetEntity.vehicle;
+    const myRouteId = myVehicle.trip?.route_id;
+    const myDirectionId = myVehicle.trip?.direction_id;
+    const myLat = myVehicle.position?.latitude;
+    const myLon = myVehicle.position?.longitude;
+
+    // 2. 같은 노선 & "같은 운행 방향(direction_id)" 차량만 필터링
+    const sameDirectionVehicles = entityList
+      .filter((e) => {
+        const v = e.vehicle;
+        if (!v || !v.position) return false;
+        if (String(v.vehicle?.id) === String(targetVehicleId)) return false; // 내 차량 제외
+
+        const isSameRoute = String(v.trip?.route_id) === String(myRouteId);
+        // direction_id가 존재하는 경우 동일한 방향만 선택
+        const isSameDirection = myDirectionId !== undefined && v.trip?.direction_id !== undefined ? String(v.trip?.direction_id) === String(myDirectionId) : true;
+
+        return isSameRoute && isSameDirection;
+      })
+      .map((e) => {
+        const v = e.vehicle;
+        const dist = getDistanceInMiles(myLat, myLon, v.position.latitude, v.position.longitude);
+        return {
+          id: v.vehicle?.id,
+          lat: v.position.latitude,
+          lon: v.position.longitude,
+          speed: v.position.speed || 0,
+          run: extractRunId(v),
+          distance: dist,
+        };
       });
-    }
 
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
+    // 3. 거리순 정렬 (가장 가까운 차량 찾기)
+    sameDirectionVehicles.sort((a, b) => a.distance - b.distance);
 
-    const buffer = await response.arrayBuffer();
-    const feed = GtfsRealtimeBindings.transit_realtime.FeedMessage.decode(new Uint8Array(buffer));
+    // 거리 기반 가장 가까운 차량 2대 선택 (앞/뒤 추정)
+    const leadVehicle = sameDirectionVehicles[0] || null;
+    const trailVehicle = sameDirectionVehicles[1] || null;
 
-    const vehicles = [];
-    for (const entity of feed.entity) {
-      if (entity.vehicle && entity.vehicle.vehicle) {
-        const v = entity.vehicle;
-        const vId = String(v.vehicle.id || '').trim();
-        const rId = String(v.trip?.routeId || '').trim();
-        const lat = v.position?.latitude;
-        const lon = v.position?.longitude;
+    // 4. 각각의 차량에 고유 Run ID 및 정보 개별 할당
+    const myRun = extractRunId(myVehicle);
 
-        if (vId && lat && lon) {
-          vehicles.push({
-            id: vId,
-            route: rId,
-            tripId: v.trip?.tripId || '',
-            lat,
-            lon,
-            speed: v.position?.speed ? Math.round(v.position.speed * 2.23694) : 0,
-            directionId: v.trip?.directionId ?? null,
-          });
+    const leadBus = leadVehicle
+      ? {
+          vehicle_id: leadVehicle.id,
+          run: leadVehicle.run, // 앞차 고유 Run ID
+          distance_miles: leadVehicle.distance.toFixed(2),
+          headway_minutes: Math.round((leadVehicle.distance / 15) * 60), // 약 15mph 평균속도 기준 추정분
         }
-      }
-    }
+      : null;
 
-    const cleanTarget = targetBus.replace(/^0+/, '');
-    const myBus = vehicles.find((v) => v.id === targetBus || v.id.replace(/^0+/, '') === cleanTarget);
+    const trailBus = trailVehicle
+      ? {
+          vehicle_id: trailVehicle.id,
+          run: trailVehicle.run, // 뒤차 고유 Run ID
+          distance_miles: trailVehicle.distance.toFixed(2),
+          headway_minutes: Math.round((trailVehicle.distance / 15) * 60),
+        }
+      : null;
 
-    if (!myBus) {
-      return res.status(404).json({
-        error: `차량 [${targetBus}]번을 모니터링망에서 찾지 못했습니다. (운행 중: ${vehicles.length}대)`,
-      });
-    }
-
-    const routeBuses = vehicles.filter((v) => v.route === myBus.route);
-
-    const busesWithDist = routeBuses.map((b) => {
-      const dLat = (b.lat - myBus.lat) * 69.0;
-      const dLon = (b.lon - myBus.lon) * 55.0;
-      const dist = Math.hypot(dLat, dLon);
-
-      return {
-        id: b.id,
-        tripId: b.tripId,
-        dist: dist,
-        isAhead: b.lon > myBus.lon || b.lat > myBus.lat,
-      };
-    });
-
-    const aheadBuses = busesWithDist.filter((b) => b.id !== myBus.id && b.isAhead).sort((a, b) => a.dist - b.dist);
-    const behindBuses = busesWithDist.filter((b) => b.id !== myBus.id && !b.isAhead).sort((a, b) => a.dist - b.dist);
-
-    const lead = aheadBuses[0] || null;
-    const trail = behindBuses[0] || null;
-
-    // 프론트엔드 UI 변수명 완벽 호환
     res.json({
-      totalOnRoute: routeBuses.length,
-      myBus: {
-        id: myBus.id,
-        route: myBus.route || 'Line -',
-        run: myBus.tripId ? myBus.tripId.slice(-4) : 'N/A',
-        speed: myBus.speed,
+      timestamp: new Date().toISOString(),
+      route_id: myRouteId,
+      direction_id: myDirectionId,
+      total_line_buses: sameDirectionVehicles.length + 1,
+      my_vehicle: {
+        vehicle_id: targetVehicleId,
+        run: myRun,
+        speed_mph: Math.round(myVehicle.position?.speed || 0),
       },
-      leadBus: lead
-        ? {
-            id: lead.id,
-            run: lead.tripId ? lead.tripId.slice(-4) : 'N/A',
-            gapMiles: lead.dist.toFixed(2),
-            gapMinutes: Math.max(1, Math.round((lead.dist / 12) * 60)),
-          }
-        : null,
-      trailBus: trail
-        ? {
-            id: trail.id,
-            run: trail.tripId ? trail.tripId.slice(-4) : 'N/A',
-            gapMiles: trail.dist.toFixed(2),
-            gapMinutes: Math.max(1, Math.round((trail.dist / 12) * 60)),
-          }
-        : null,
-      updatedAt: new Date().toLocaleTimeString('en-US'),
+      lead_bus: leadBus,
+      trail_bus: trailBus,
     });
   } catch (err) {
-    res.status(500).json({ error: `실시간 통신 오류: ${err.message}` });
+    console.error('API Error:', err);
+    res.status(500).json({ error: '서버 데이터 처리 중 오류가 발생했습니다.' });
   }
 });
 
+// 루트 페이지
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
 app.listen(PORT, () => {
-  console.log(`🚀 Headway Monitor 서버 실행 완료: http://localhost:${PORT}`);
+  console.log(`Headway Monitor 서버 실행 중: http://localhost:${PORT}`);
 });
