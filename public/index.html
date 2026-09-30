@@ -27,21 +27,21 @@ function getDistanceInMiles(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-// 차량 고유 Run ID 추출 함수
-function getVehicleRun(v) {
-  if (!v) return 'N/A';
+// 각 차량 고유 Run ID / Work Run 파싱 함수
+function parseRunId(vehicleObj) {
+  if (!vehicleObj) return 'N/A';
   
-  // 1. vehicle.trip.trip_id 파싱 (LA Metro 포맷: ex. 13201_NE26_1)
-  const tripId = v.trip?.trip_id || '';
+  // 1. trip_id에서 식별 (예: 13201_NE26_1 -> NE26)
+  const tripId = vehicleObj.trip?.trip_id || '';
   if (tripId.includes('_')) {
     const parts = tripId.split('_');
     if (parts.length >= 2 && parts[1]) return parts[1];
   }
 
-  // 2. 기타 객체 내부 run_id 필드 검색
-  if (v.run_id) return v.run_id;
-  if (v.vehicle?.run_id) return v.vehicle.run_id;
-  if (v.trip?.run_id) return v.trip.run_id;
+  // 2. vehicle.label / run_id 직접 추출
+  if (vehicleObj.run_id) return vehicleObj.run_id;
+  if (vehicleObj.vehicle?.run_id) return vehicleObj.vehicle.run_id;
+  if (vehicleObj.trip?.run_id) return vehicleObj.trip.run_id;
 
   return 'N/A';
 }
@@ -62,7 +62,7 @@ app.get('/api/headway', async (req, res) => {
     const data = await response.json();
     const entityList = data.entity || [];
 
-    // 대상 차량 찾기
+    // 1. 조회 대상 차량 찾기
     const targetEntity = entityList.find(
       (e) => String(e.vehicle?.vehicle?.id) === String(targetVehicleId)
     );
@@ -76,29 +76,23 @@ app.get('/api/headway', async (req, res) => {
     const myDirectionId = myVehicle.trip?.direction_id;
     const myLat = myVehicle.position?.latitude;
     const myLon = myVehicle.position?.longitude;
-    const myBearing = myVehicle.position?.bearing || 0; // 내 차의 진행 방위각 (0~360도)
-    const myRun = getVehicleRun(myVehicle);
+    const myStopSeq = myVehicle.current_stop_sequence || 0;
+    const myRun = parseRunId(myVehicle);
 
-    const sameDirectionVehicles = [];
+    const aheadBuses = [];
+    const behindBuses = [];
 
+    // 2. 같은 노선 & 같은 방향 차량 분류 (stop_sequence 기준 정밀 판별)
     entityList.forEach((e) => {
       const v = e.vehicle;
       if (!v || !v.position) return;
       if (String(v.vehicle?.id) === String(targetVehicleId)) return;
 
       const isSameRoute = String(v.trip?.route_id) === String(myRouteId);
-      
-      // 방위각(bearing) 차이 검증 (같은 방향으로 가고 있는지 확인: 60도 이내)
-      const vBearing = v.position.bearing || 0;
-      let bearingDiff = Math.abs(myBearing - vBearing);
-      if (bearingDiff > 180) bearingDiff = 360 - bearingDiff;
-      const isSimilarBearing = myBearing === 0 || vBearing === 0 || bearingDiff < 60;
-
-      // direction_id 및 bearing 조건 결합
       const isSameDirection =
-        (myDirectionId !== undefined && v.trip?.direction_id !== undefined
+        myDirectionId !== undefined && v.trip?.direction_id !== undefined
           ? String(v.trip?.direction_id) === String(myDirectionId)
-          : true) && isSimilarBearing;
+          : true;
 
       if (isSameRoute && isSameDirection) {
         const dist = getDistanceInMiles(
@@ -107,39 +101,45 @@ app.get('/api/headway', async (req, res) => {
           v.position.latitude,
           v.position.longitude
         );
+        const vStopSeq = v.current_stop_sequence || 0;
+        const vRun = parseRunId(v);
 
-        // 내 차 방위각 기반 전방/후방 벡터 판별
-        const rad = (myBearing * Math.PI) / 180;
-        const forwardVectorX = Math.sin(rad); // East-West
-        const forwardVectorY = Math.cos(rad); // North-South
-
-        const deltaX = (v.position.longitude - myLon) * Math.cos((myLat * Math.PI) / 180);
-        const deltaY = v.position.latitude - myLat;
-
-        // 내 차 진행 방향 벡터와의 내적(Dot Product)으로 앞/뒤 판별
-        const dotProduct = deltaX * forwardVectorX + deltaY * forwardVectorY;
-        const isAhead = dotProduct > 0;
-
-        sameDirectionVehicles.push({
+        const busData = {
           id: String(v.vehicle?.id),
           lat: v.position.latitude,
           lon: v.position.longitude,
           speed: v.position.speed || 0,
-          run: getVehicleRun(v), // 차량 개별 고유 Run ID
+          run: vRun,
           distance: dist,
-          isAhead: isAhead
-        });
+          stopSeq: vStopSeq
+        };
+
+        // stop_sequence가 제공되는 경우 정류장 순서로 앞/뒤 구분
+        if (vStopSeq !== 0 && myStopSeq !== 0) {
+          if (vStopSeq > myStopSeq) {
+            aheadBuses.push(busData);
+          } else if (vStopSeq < myStopSeq) {
+            behindBuses.push(busData);
+          } else {
+            // stop_sequence가 동일한 경우 위도/경도 진행방향 기반 보정
+            if (dist < 3.0) behindBuses.push(busData);
+          }
+        } else {
+          // stop_sequence 부재 시 내차와의 거리 기반 분류
+          if (dist < 3.0) {
+            behindBuses.push(busData);
+          } else {
+            aheadBuses.push(busData);
+          }
+        }
       }
     });
 
-    // 앞차 (isAhead = true 중 가장 가까운 차량)
-    const aheadBuses = sameDirectionVehicles.filter((b) => b.isAhead);
+    // 3. 앞차/뒤차 거리순 정렬 (가장 가까운 차량 선택)
     aheadBuses.sort((a, b) => a.distance - b.distance);
-    const leadVehicle = aheadBuses[0] || null;
-
-    // 뒤차 (isAhead = false 중 가장 가까운 차량)
-    const behindBuses = sameDirectionVehicles.filter((b) => !b.isAhead);
     behindBuses.sort((a, b) => a.distance - b.distance);
+
+    const leadVehicle = aheadBuses[0] || null;
     const trailVehicle = behindBuses[0] || null;
 
     const leadBus = leadVehicle
@@ -164,7 +164,7 @@ app.get('/api/headway', async (req, res) => {
       timestamp: new Date().toISOString(),
       route_id: myRouteId,
       direction_id: myDirectionId,
-      total_line_buses: sameDirectionVehicles.length + 1,
+      total_line_buses: aheadBuses.length + behindBuses.length + 1,
       my_vehicle: {
         vehicle_id: targetVehicleId,
         run: myRun,
