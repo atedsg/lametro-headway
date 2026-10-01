@@ -3,233 +3,109 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>LA Metro Headway Monitor</title>
+  <title>LA Metro Vehicle Raw Data Monitor</title>
   <style>
-    :root {
-      --bg-color: #0f172a;
-      --card-bg: #1e293b;
-      --border-color: #334155;
-      --text-main: #f8fafc;
-      --text-sub: #94a3b8;
-      --accent-lead: #10b981;
-      --accent-my: #f59e0b;
-      --accent-trail: #3b82f6;
-    }
-
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background-color: var(--bg-color);
-      color: var(--text-main);
-      margin: 0;
+      background-color: #0f172a;
+      color: #f8fafc;
+      font-family: monospace;
       padding: 20px;
-      display: flex;
-      justify-content: center;
+      margin: 0;
     }
-
     .container {
-      width: 100%;
-      max-width: 500px;
+      max-width: 900px;
+      margin: 0 auto;
     }
-
     .search-box {
       display: flex;
       gap: 10px;
       margin-bottom: 20px;
     }
-
     input {
       flex: 1;
-      padding: 12px 16px;
-      border-radius: 8px;
-      border: 1px solid var(--border-color);
-      background-color: var(--card-bg);
-      color: var(--text-main);
+      padding: 12px;
+      background: #1e293b;
+      border: 1px solid #334155;
+      color: #fff;
+      border-radius: 6px;
       font-size: 16px;
     }
-
     button {
       padding: 12px 24px;
-      border-radius: 8px;
+      background: #f59e0b;
       border: none;
-      background-color: var(--accent-my);
       color: #000;
       font-weight: bold;
-      font-size: 16px;
+      border-radius: 6px;
       cursor: pointer;
     }
-
-    .status-bar {
-      font-size: 13px;
-      color: var(--text-sub);
-      margin-bottom: 15px;
+    .section-title {
+      color: #38bdf8;
+      margin-top: 20px;
+      font-size: 18px;
     }
-
-    .card {
-      background-color: var(--card-bg);
-      border: 1px solid var(--border-color);
-      border-radius: 12px;
-      padding: 16px;
-      margin-bottom: 12px;
-      position: relative;
-    }
-
-    .card.my-bus {
-      border: 2px solid var(--accent-my);
-    }
-
-    .card-header {
+    pre {
+      background: #1e293b;
+      padding: 15px;
+      border-radius: 8px;
+      border: 1px solid #334155;
+      overflow-x: auto;
+      color: #a7f3d0;
       font-size: 14px;
-      font-weight: 600;
-      margin-bottom: 6px;
-      display: flex;
-      justify-content: space-between;
-    }
-
-    .lead-title { color: var(--accent-lead); }
-    .my-title { color: var(--accent-my); }
-    .trail-title { color: var(--accent-trail); }
-
-    .vehicle-id {
-      font-size: 28px;
-      font-weight: 800;
-      letter-spacing: 0.5px;
-    }
-
-    .run-id {
-      font-size: 12px;
-      color: var(--text-sub);
-      margin-top: 2px;
-    }
-
-    .card-right {
-      position: absolute;
-      right: 16px;
-      top: 50%;
-      transform: translateY(-50%);
-      text-align: right;
-    }
-
-    .metric-value {
-      font-size: 22px;
-      font-weight: bold;
-    }
-
-    .metric-unit {
-      font-size: 12px;
-      color: var(--text-sub);
-    }
-
-    .badge {
-      background-color: rgba(245, 158, 11, 0.2);
-      color: var(--accent-my);
-      padding: 4px 8px;
-      border-radius: 4px;
-      font-size: 12px;
-      font-weight: 600;
     }
   </style>
 </head>
 <body>
 
 <div class="container">
+  <h2>🚌 LA Metro API Raw Data Inspector</h2>
   <div class="search-box">
     <input type="text" id="vehicleIdInput" placeholder="차량 번호 입력 (예: 4038)" value="4038">
-    <button onclick="fetchHeadway()">추적</button>
+    <button onclick="fetchRawData()">조회</button>
   </div>
 
-  <div class="status-bar" id="statusBar">노선 정보를 조회하려면 차량 번호를 입력하세요.</div>
+  <div id="status">차량 번호를 입력하고 조회 버튼을 누르세요.</div>
 
-  <!-- 앞차 Card -->
-  <div class="card">
-    <div class="card-header lead-title">▲ 앞차 (Lead Bus)</div>
-    <div class="vehicle-id" id="leadId">--</div>
-    <div class="run-id" id="leadRun">Run: --</div>
-    <div class="card-right">
-      <div class="metric-value" id="leadStops" style="color: var(--accent-lead);">--</div>
-      <div class="metric-unit" id="leadSeq">정류장 앞</div>
-    </div>
-  </div>
+  <div class="section-title">📌 내 차량 원본 객체 (Target Vehicle Raw)</div>
+  <pre id="myRawData">// 조회 결과가 여기에 표시됩니다.</pre>
 
-  <!-- 내 차량 Card -->
-  <div class="card my-bus">
-    <div class="card-header my-title">
-      ● 내 차량
-      <span class="badge" id="routeBadge">Line --</span>
-    </div>
-    <div class="vehicle-id" id="myId" style="color: var(--accent-my);">--</div>
-    <div class="run-id" id="myRun">Run: --</div>
-    <div class="card-right">
-      <div class="metric-value" id="mySpeed">--</div>
-      <div class="metric-unit">mph</div>
-    </div>
-  </div>
-
-  <!-- 뒤차 Card -->
-  <div class="card">
-    <div class="card-header trail-title">▼ 뒤차 (Trail Bus)</div>
-    <div class="vehicle-id" id="trailId">--</div>
-    <div class="run-id" id="trailRun">Run: --</div>
-    <div class="card-right">
-      <div class="metric-value" id="trailStops" style="color: var(--accent-trail);">--</div>
-      <div class="metric-unit" id="trailSeq">정류장 뒤</div>
-    </div>
-  </div>
+  <div class="section-title">🚌 동일 노선 전체 차량 목록 (Same Route Raw List)</div>
+  <pre id="allRawData">// 동일 노선 운행 차량 전체 데이터가 여기에 표시됩니다.</pre>
 </div>
 
 <script>
-  async function fetchHeadway() {
+  async function fetchRawData() {
     const vehicleId = document.getElementById('vehicleIdInput').value.trim();
     if (!vehicleId) return;
 
-    const statusBar = document.getElementById('statusBar');
-    statusBar.innerText = '데이터 조회 중...';
+    document.getElementById('status').innerText = '데이터 가져오는 중...';
 
     try {
       const res = await fetch(`/api/headway?vehicle_id=${vehicleId}`);
       if (!res.ok) {
-        const errData = await res.json();
-        throw new Error(errData.error || '조회 실패');
+        const err = await res.json();
+        throw new Error(err.error || '조회 실패');
       }
 
       const data = await res.json();
 
-      const now = new Date(data.timestamp).toLocaleTimeString();
-      statusBar.innerText = `노선 ${data.route_id}번 | 총 ${data.total_line_buses}대 운행 중 (갱신: ${now})`;
+      document.getElementById('status').innerText = 
+        `갱신: ${new Date(data.timestamp).toLocaleTimeString()} | 노선 내 총 ${data.total_same_route_count}대 운행 중`;
 
-      // 내 차량 데이터
-      document.getElementById('routeBadge').innerText = `Line ${data.route_id}`;
-      document.getElementById('myId').innerText = data.my_vehicle.vehicle_id;
-      document.getElementById('myRun').innerText = `${data.my_vehicle.run}`;
-      document.getElementById('mySpeed').innerText = data.my_vehicle.speed_mph;
+      // 내 차량 원본 JSON 구조 렌더링
+      document.getElementById('myRawData').innerText = 
+        JSON.stringify(data.my_vehicle_raw, null, 2);
 
-      // 앞차 데이터
-      if (data.lead_bus) {
-        document.getElementById('leadId').innerText = data.lead_bus.vehicle_id;
-        document.getElementById('leadRun').innerText = `${data.lead_bus.run}`;
-        document.getElementById('leadStops').innerText = `${data.lead_bus.stops_ahead} 개`;
-      } else {
-        document.getElementById('leadId').innerText = 'None';
-        document.getElementById('leadRun').innerText = 'Run: N/A';
-        document.getElementById('leadStops').innerText = '--';
-      }
-
-      // 뒤차 데이터
-      if (data.trail_bus) {
-        document.getElementById('trailId').innerText = data.trail_bus.vehicle_id;
-        document.getElementById('trailRun').innerText = `${data.trail_bus.run}`;
-        document.getElementById('trailStops').innerText = `${data.trail_bus.stops_behind} 개`;
-      } else {
-        document.getElementById('trailId').innerText = 'None';
-        document.getElementById('trailRun').innerText = 'Run: N/A';
-        document.getElementById('trailStops').innerText = '--';
-      }
+      // 같은 노선 전체 차량 원본 JSON 렌더링
+      document.getElementById('allRawData').innerText = 
+        JSON.stringify(data.all_route_vehicles_raw, null, 2);
 
     } catch (err) {
-      statusBar.innerText = `오류: ${err.message}`;
+      document.getElementById('status').innerText = `오류: ${err.message}`;
     }
   }
 
-  fetchHeadway();
+  fetchRawData();
 </script>
 
 </body>

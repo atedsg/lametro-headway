@@ -13,18 +13,6 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const METRO_API_URL = 'https://api.metro.net/LAMetroGTFS_Realtime/vehicle_positions.json';
 
-// Work Run ID 파싱 (NE26 중복 문제 해결)
-function parseRunId(vehicleObj) {
-  if (!vehicleObj) return 'N/A';
-  const tripId = vehicleObj.trip?.trip_id || '';
-  if (tripId.includes('_')) {
-    const parts = tripId.split('_');
-    if (parts.length >= 3 && parts[2]) return `Run ${parts[2]}`;
-    if (parts.length >= 1 && parts[0]) return `Trip ${parts[0]}`;
-  }
-  return vehicleObj.vehicle?.label || 'N/A';
-}
-
 app.get('/api/headway', async (req, res) => {
   const targetVehicleId = req.query.vehicle_id;
 
@@ -41,7 +29,7 @@ app.get('/api/headway', async (req, res) => {
     const data = await response.json();
     const entityList = data.entity || [];
 
-    // 1. Target (내 차량) 검색
+    // 1. 조회 대상 차량 찾기
     const targetEntity = entityList.find((e) => String(e.vehicle?.vehicle?.id) === String(targetVehicleId));
 
     if (!targetEntity) {
@@ -50,77 +38,17 @@ app.get('/api/headway', async (req, res) => {
 
     const myVehicle = targetEntity.vehicle;
     const myRouteId = myVehicle.trip?.route_id;
-    const myDirectionId = myVehicle.trip?.direction_id;
-    const myStopSeq = myVehicle.current_stop_sequence || 0;
-    const myRun = parseRunId(myVehicle);
 
-    const aheadBuses = [];
-    const behindBuses = [];
+    // 2. 동일 노선(Route)의 모든 차량 원본 데이터 수집
+    const sameRouteVehicles = entityList.filter((e) => String(e.vehicle?.trip?.route_id) === String(myRouteId)).map((e) => e.vehicle);
 
-    // 2. 같은 노선 & 엄격한 direction_id 검증
-    entityList.forEach((e) => {
-      const v = e.vehicle;
-      if (!v || !v.trip) return;
-      if (String(v.vehicle?.id) === String(targetVehicleId)) return;
-
-      const isSameRoute = String(v.trip?.route_id) === String(myRouteId);
-      const vDir = v.trip?.direction_id;
-
-      // direction_id가 명확히 동일할 때만 인정
-      const isSameDirection = myDirectionId !== undefined && vDir !== undefined && String(vDir) === String(myDirectionId);
-
-      if (isSameRoute && isSameDirection) {
-        const vStopSeq = v.current_stop_sequence || 0;
-        const vRun = parseRunId(v);
-
-        const busData = {
-          id: String(v.vehicle?.id),
-          run: vRun,
-          stopSeq: vStopSeq,
-        };
-
-        if (vStopSeq > myStopSeq) {
-          aheadBuses.push(busData);
-        } else if (vStopSeq < myStopSeq) {
-          behindBuses.push(busData);
-        }
-      }
-    });
-
-    // 3. 정류장 순서 기준 정렬
-    aheadBuses.sort((a, b) => a.stopSeq - b.stopSeq); // 가장 가까운 앞차
-    behindBuses.sort((a, b) => b.stopSeq - a.stopSeq); // 가장 가까운 뒤차
-
-    const leadVehicle = aheadBuses[0] || null;
-    const trailVehicle = behindBuses[0] || null;
-
+    // 원본 데이터 전체 전달
     res.json({
       timestamp: new Date().toISOString(),
-      route_id: myRouteId,
-      direction_id: myDirectionId,
-      total_line_buses: aheadBuses.length + behindBuses.length + 1,
-      my_vehicle: {
-        vehicle_id: targetVehicleId,
-        run: myRun,
-        speed_mph: Math.round(myVehicle.position?.speed || 0),
-        stop_sequence: myStopSeq,
-      },
-      lead_bus: leadVehicle
-        ? {
-            vehicle_id: leadVehicle.id,
-            run: leadVehicle.run,
-            stop_sequence: leadVehicle.stopSeq,
-            stops_ahead: leadVehicle.stopSeq - myStopSeq,
-          }
-        : null,
-      trail_bus: trailVehicle
-        ? {
-            vehicle_id: trailVehicle.id,
-            run: trailVehicle.run,
-            stop_sequence: trailVehicle.stopSeq,
-            stops_behind: myStopSeq - trailVehicle.stopSeq,
-          }
-        : null,
+      target_vehicle_id: targetVehicleId,
+      my_vehicle_raw: myVehicle,
+      total_same_route_count: sameRouteVehicles.length,
+      all_route_vehicles_raw: sameRouteVehicles,
     });
   } catch (err) {
     console.error('API Error:', err);
