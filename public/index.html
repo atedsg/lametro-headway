@@ -193,7 +193,6 @@
 
       const data = await res.json();
 
-      // 상태 바 업데이트
       const now = new Date(data.timestamp).toLocaleTimeString();
       statusBar.innerText = `노선 ${data.route_id}번 | 총 ${data.total_line_buses}대 운행 중 (갱신: ${now})`;
 
@@ -230,7 +229,6 @@
     }
   }
 
-  // 초기 자동 조회를 실행하려면 아래 주석 해제
   fetchHeadway();
 </script>
 
