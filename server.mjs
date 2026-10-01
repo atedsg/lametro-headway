@@ -13,7 +13,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const METRO_API_URL = 'https://api.metro.net/LAMetroGTFS_Realtime/vehicle_positions.json';
 
-// trip_id 기반 고유 Run ID / Work ID 추출
+// Work Run ID 파싱 (NE26 중복 문제 해결)
 function parseRunId(vehicleObj) {
   if (!vehicleObj) return 'N/A';
   const tripId = vehicleObj.trip?.trip_id || '';
@@ -57,16 +57,16 @@ app.get('/api/headway', async (req, res) => {
     const aheadBuses = [];
     const behindBuses = [];
 
-    // 2. 같은 노선 & 엄격하게 일치하는 direction_id 버스만 분류
+    // 2. 같은 노선 & 엄격한 direction_id 검증
     entityList.forEach((e) => {
       const v = e.vehicle;
       if (!v || !v.trip) return;
       if (String(v.vehicle?.id) === String(targetVehicleId)) return;
 
       const isSameRoute = String(v.trip?.route_id) === String(myRouteId);
-
-      // direction_id가 명확히 동일할 때만 동방향 버스로 인정 (undefined 방지)
       const vDir = v.trip?.direction_id;
+
+      // direction_id가 명확히 동일할 때만 인정
       const isSameDirection = myDirectionId !== undefined && vDir !== undefined && String(vDir) === String(myDirectionId);
 
       if (isSameRoute && isSameDirection) {
@@ -87,7 +87,7 @@ app.get('/api/headway', async (req, res) => {
       }
     });
 
-    // 3. 정류장 순서 차이 정렬
+    // 3. 정류장 순서 기준 정렬
     aheadBuses.sort((a, b) => a.stopSeq - b.stopSeq); // 가장 가까운 앞차
     behindBuses.sort((a, b) => b.stopSeq - a.stopSeq); // 가장 가까운 뒤차
 
