@@ -13,20 +13,16 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const METRO_API_URL = 'https://api.metro.net/LAMetroGTFS_Realtime/vehicle_positions.json';
 
-// 각 차량 고유 Run ID / Work Run 파싱 함수 (NE26 중복 고정 문제 해결)
+// trip_id 기반 고유 Run ID / Work ID 추출
 function parseRunId(vehicleObj) {
   if (!vehicleObj) return 'N/A';
-
   const tripId = vehicleObj.trip?.trip_id || '';
   if (tripId.includes('_')) {
     const parts = tripId.split('_');
-    // 세 번째 마디가 있으면 세 번째 마디, 없으면 첫 번째 마디(Trip 번호) 사용
     if (parts.length >= 3 && parts[2]) return `Run ${parts[2]}`;
     if (parts.length >= 1 && parts[0]) return `Trip ${parts[0]}`;
   }
-
-  if (vehicleObj.vehicle?.label) return vehicleObj.vehicle.label;
-  return 'N/A';
+  return vehicleObj.vehicle?.label || 'N/A';
 }
 
 app.get('/api/headway', async (req, res) => {
@@ -45,7 +41,7 @@ app.get('/api/headway', async (req, res) => {
     const data = await response.json();
     const entityList = data.entity || [];
 
-    // 1. 조회 대상 차량 찾기
+    // 1. Target (내 차량) 검색
     const targetEntity = entityList.find((e) => String(e.vehicle?.vehicle?.id) === String(targetVehicleId));
 
     if (!targetEntity) {
@@ -61,16 +57,17 @@ app.get('/api/headway', async (req, res) => {
     const aheadBuses = [];
     const behindBuses = [];
 
-    // 2. 같은 노선 & 같은 방향 차량 분류
+    // 2. 같은 노선 & 엄격하게 일치하는 direction_id 버스만 분류
     entityList.forEach((e) => {
       const v = e.vehicle;
-      if (!v) return;
+      if (!v || !v.trip) return;
       if (String(v.vehicle?.id) === String(targetVehicleId)) return;
 
       const isSameRoute = String(v.trip?.route_id) === String(myRouteId);
 
-      // direction_id 일치 여부 엄격 검증
-      const isSameDirection = myDirectionId !== undefined && v.trip?.direction_id !== undefined ? String(v.trip?.direction_id) === String(myDirectionId) : true;
+      // direction_id가 명확히 동일할 때만 동방향 버스로 인정 (undefined 방지)
+      const vDir = v.trip?.direction_id;
+      const isSameDirection = myDirectionId !== undefined && vDir !== undefined && String(vDir) === String(myDirectionId);
 
       if (isSameRoute && isSameDirection) {
         const vStopSeq = v.current_stop_sequence || 0;
@@ -82,7 +79,6 @@ app.get('/api/headway', async (req, res) => {
           stopSeq: vStopSeq,
         };
 
-        // stop_sequence 기준으로 단순 명쾌하게 분류 (거리 제약 제거)
         if (vStopSeq > myStopSeq) {
           aheadBuses.push(busData);
         } else if (vStopSeq < myStopSeq) {
@@ -91,9 +87,9 @@ app.get('/api/headway', async (req, res) => {
       }
     });
 
-    // 3. 정류장 순서 차이가 가장 작은 순서로 정렬
-    aheadBuses.sort((a, b) => a.stopSeq - b.stopSeq); // 앞차: 나보다 순번이 가장 조금 높은 차
-    behindBuses.sort((a, b) => b.stopSeq - a.stopSeq); // 뒤차: 나보다 순번이 가장 조금 낮은 차
+    // 3. 정류장 순서 차이 정렬
+    aheadBuses.sort((a, b) => a.stopSeq - b.stopSeq); // 가장 가까운 앞차
+    behindBuses.sort((a, b) => b.stopSeq - a.stopSeq); // 가장 가까운 뒤차
 
     const leadVehicle = aheadBuses[0] || null;
     const trailVehicle = behindBuses[0] || null;
